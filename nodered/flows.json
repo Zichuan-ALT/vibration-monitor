@@ -1,0 +1,516 @@
+[
+    {
+        "id": "tab_vib",
+        "type": "tab",
+        "label": "振动监测",
+        "disabled": false,
+        "info": "主题 8.1 振动状态监测器",
+        "env": []
+    },
+    {
+        "id": "tab_live",
+        "type": "ui_tab",
+        "name": "实时状态",
+        "icon": "dashboard",
+        "order": 1,
+        "disabled": false,
+        "hidden": false
+    },
+    {
+        "id": "tab_hist",
+        "type": "ui_tab",
+        "name": "历史查询",
+        "icon": "history",
+        "order": 2,
+        "disabled": false,
+        "hidden": false
+    },
+    {
+        "id": "grp_real",
+        "type": "ui_group",
+        "name": "实时状态",
+        "tab": "tab_live",
+        "order": 1,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "grp_alarm",
+        "type": "ui_group",
+        "name": "报警与建议",
+        "tab": "tab_live",
+        "order": 2,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "grp_hist",
+        "type": "ui_group",
+        "name": "趋势",
+        "tab": "tab_live",
+        "order": 3,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "grp_db",
+        "type": "ui_group",
+        "name": "数据库历史",
+        "tab": "tab_hist",
+        "order": 1,
+        "disp": true,
+        "width": "12",
+        "collapse": false
+    },
+    {
+        "id": "aedes_broker_1",
+        "type": "aedes broker",
+        "z": "tab_vib",
+        "name": "MQTT Broker (1883)",
+        "mqtt_port": 1883,
+        "mqtt_ws_bind": "port",
+        "mqtt_ws_port": null,
+        "mqtt_ws_path": "",
+        "cert": "",
+        "key": "",
+        "ca": "",
+        "certname": "",
+        "keyname": "",
+        "caname": "",
+        "persistence_bind": "memory",
+        "dburl": "",
+        "persist_to_file": false,
+        "usetls": false,
+        "x": 160,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "broker_conf_1",
+        "type": "mqtt-broker",
+        "name": "本地 aedes 1883",
+        "broker": "127.0.0.1",
+        "port": "1883",
+        "clientid": "",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "birthMsg": {},
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "closeMsg": {},
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": "",
+        "willMsg": {}
+    },
+    {
+        "id": "mqtt_in_1",
+        "type": "mqtt in",
+        "z": "tab_vib",
+        "name": "ESP32 /state",
+        "topic": "smartcampus/vib/+/state",
+        "qos": "1",
+        "datatype": "json",
+        "broker": "broker_conf_1",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 150,
+        "y": 150,
+        "wires": [
+            [
+                "func_1",
+                "func_db",
+                "func_alarm",
+                "file_1",
+                "debug_1"
+            ]
+        ]
+    },
+    {
+        "id": "func_1",
+        "type": "function",
+        "z": "tab_vib",
+        "name": "拆分字段",
+        "func": "var d = msg.payload;\nif (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return null; } }\nif (!d || d.rms === undefined) { return null; }\nreturn [\n  { payload: d.rms },\n  { payload: d.temp },\n  { payload: d.state },\n  { payload: d.rms, topic: 'RMS', _raw: d }\n];",
+        "outputs": 4,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 40,
+        "wires": [
+            [
+                "gauge_rms"
+            ],
+            [
+                "gauge_temp"
+            ],
+            [
+                "text_state"
+            ],
+            [
+                "chart_rms"
+            ]
+        ]
+    },
+    {
+        "id": "gauge_rms",
+        "type": "ui_gauge",
+        "z": "tab_vib",
+        "name": "振动 RMS",
+        "group": "grp_real",
+        "order": 1,
+        "width": "6",
+        "height": "5",
+        "gtype": "gage",
+        "title": "振动 RMS (g)",
+        "label": "g",
+        "format": "{{value}}",
+        "min": 0,
+        "max": "0.1",
+        "colors": [
+            "#00b500",
+            "#e6e600",
+            "#ca3838"
+        ],
+        "seg1": "",
+        "seg2": "",
+        "x": 640,
+        "y": 10,
+        "wires": []
+    },
+    {
+        "id": "gauge_temp",
+        "type": "ui_gauge",
+        "z": "tab_vib",
+        "name": "表面温度",
+        "group": "grp_real",
+        "order": 2,
+        "width": "6",
+        "height": "5",
+        "gtype": "gage",
+        "title": "表面温度 (℃)",
+        "label": "℃",
+        "format": "{{value}}",
+        "min": 0,
+        "max": "60",
+        "colors": [
+            "#00b500",
+            "#e6e600",
+            "#ca3838"
+        ],
+        "seg1": "",
+        "seg2": "",
+        "x": 640,
+        "y": 70,
+        "wires": []
+    },
+    {
+        "id": "text_state",
+        "type": "ui_text",
+        "z": "tab_vib",
+        "name": "设备上报状态",
+        "group": "grp_real",
+        "order": 3,
+        "width": "12",
+        "height": "2",
+        "name2": "状态",
+        "label": "设备上报状态",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "x": 640,
+        "y": 130,
+        "wires": []
+    },
+    {
+        "id": "func_alarm",
+        "type": "function",
+        "z": "tab_vib",
+        "name": "报警状态机（3/5 帧迟滞）",
+        "func": "var d = msg.payload;\nif (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return null; } }\nif (!d || d.rms === undefined) { return null; }\n\n// 阈值：演示用固定值；正式版改为基线自学习得到的 μ+3σ / μ+6σ\nvar WARN  = 0.030;\nvar ALARM = 0.060;\n\nvar st = context.get('alarm') || { level: 0, up: 0, down: 0 };\nvar target = d.rms >= ALARM ? 2 : (d.rms >= WARN ? 1 : 0);\n\n// 迟滞：升级需连续 3 帧确认，降级需连续 5 帧确认\nif (target > st.level)      { st.up++;   st.down = 0; }\nelse if (target < st.level) { st.down++; st.up   = 0; }\nelse                        { st.up = 0; st.down = 0; }\n\nif (st.up >= 3)   { st.level = target; st.up = 0; }\nif (st.down >= 5) { st.level = target; st.down = 0; }\n\ncontext.set('alarm', st);\n\nvar LEVEL = ['正常', '注意', '报警'];\nvar ADVICE = [\n  '运行正常，继续保持监测',\n  '振动偏高：建议检查地脚螺栓与紧固件',\n  '振动异常：建议停机检查动平衡与轴承'\n];\n\nreturn [\n  { payload: LEVEL[st.level] },\n  { payload: ADVICE[st.level] },\n  { payload: st.level }\n];",
+        "outputs": 3,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 160,
+        "wires": [
+            [
+                "text_alarm"
+            ],
+            [
+                "text_advice"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "text_alarm",
+        "type": "ui_text",
+        "z": "tab_vib",
+        "name": "报警等级",
+        "group": "grp_alarm",
+        "order": 1,
+        "width": "6",
+        "height": "2",
+        "name2": "等级",
+        "label": "报警等级",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "x": 700,
+        "y": 150,
+        "wires": []
+    },
+    {
+        "id": "text_advice",
+        "type": "ui_text",
+        "z": "tab_vib",
+        "name": "维修建议",
+        "group": "grp_alarm",
+        "order": 2,
+        "width": "12",
+        "height": "2",
+        "name2": "建议",
+        "label": "维修建议",
+        "format": "{{msg.payload}}",
+        "layout": "row-spread",
+        "x": 700,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "chart_rms",
+        "type": "ui_chart",
+        "z": "tab_vib",
+        "name": "RMS 实时趋势",
+        "group": "grp_hist",
+        "order": 1,
+        "width": "12",
+        "height": "6",
+        "label": "振动 RMS 实时趋势",
+        "chartType": "line",
+        "legend": false,
+        "xformat": "HH:mm:ss",
+        "interpolate": "linear",
+        "nodata": "等待数据…",
+        "ymin": "0",
+        "ymax": "0.1",
+        "removeOlder": "60",
+        "removeOlderPoints": "",
+        "removeOlderUnit": "60",
+        "cutout": 0,
+        "useOneColor": true,
+        "useUTC": false,
+        "colors": [
+            "#1f77b4"
+        ],
+        "outputs": 1,
+        "x": 640,
+        "y": 250,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "sqlite_db_1",
+        "type": "sqlitedb",
+        "db": "C:/Users/孙良言/.node-red/vibration.db",
+        "mode": "RWC"
+    },
+    {
+        "id": "func_db",
+        "type": "function",
+        "z": "tab_vib",
+        "name": "组装 INSERT 参数",
+        "func": "var d = msg.payload;\nif (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return null; } }\nif (!d || d.rms === undefined) { return null; }\nmsg.params = [ new Date().toISOString(), d.node || 'unknown', d.rms, d.temp, d.state ];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 400,
+        "wires": [
+            [
+                "sqlite_insert"
+            ]
+        ]
+    },
+    {
+        "id": "sqlite_insert",
+        "type": "sqlite",
+        "z": "tab_vib",
+        "name": "写入历史",
+        "mydb": "sqlite_db_1",
+        "sqlquery": "prepared",
+        "sql": "INSERT INTO readings (ts, node, rms, temp, state) VALUES (?, ?, ?, ?, ?)",
+        "x": 630,
+        "y": 400,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "inject_hist",
+        "type": "inject",
+        "z": "tab_vib",
+        "name": "每 30 秒查询",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "30",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "3",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 200,
+        "y": 520,
+        "wires": [
+            [
+                "func_hist"
+            ]
+        ]
+    },
+    {
+        "id": "func_hist",
+        "type": "function",
+        "z": "tab_vib",
+        "name": "准备查询",
+        "func": "msg.params = [];\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 400,
+        "y": 520,
+        "wires": [
+            [
+                "sqlite_query"
+            ]
+        ]
+    },
+    {
+        "id": "sqlite_query",
+        "type": "sqlite",
+        "z": "tab_vib",
+        "name": "查询最近 200 条",
+        "mydb": "sqlite_db_1",
+        "sqlquery": "prepared",
+        "sql": "SELECT ts, rms FROM readings ORDER BY id DESC LIMIT 200",
+        "x": 620,
+        "y": 520,
+        "wires": [
+            [
+                "func_chart"
+            ]
+        ]
+    },
+    {
+        "id": "func_chart",
+        "type": "function",
+        "z": "tab_vib",
+        "name": "转成曲线数据",
+        "func": "var rows = msg.payload;\nif (!Array.isArray(rows)) { return null; }\nvar pts = rows.map(function (r) {\n  return { x: Date.parse(r.ts), y: r.rms };\n}).reverse();\nmsg.reset = true;\nmsg.payload = pts;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 820,
+        "y": 520,
+        "wires": [
+            [
+                "chart_hist"
+            ]
+        ]
+    },
+    {
+        "id": "chart_hist",
+        "type": "ui_chart",
+        "z": "tab_vib",
+        "name": "数据库历史曲线",
+        "group": "grp_db",
+        "order": 1,
+        "width": "12",
+        "height": "8",
+        "label": "SQLite 历史（最近 200 条）",
+        "chartType": "line",
+        "legend": false,
+        "xformat": "HH:mm:ss",
+        "interpolate": "linear",
+        "nodata": "数据库暂无数据",
+        "ymin": "0",
+        "ymax": "0.1",
+        "removeOlder": "0",
+        "removeOlderPoints": "",
+        "removeOlderUnit": "3600",
+        "cutout": 0,
+        "useOneColor": true,
+        "useUTC": false,
+        "colors": [
+            "#ff7f0e"
+        ],
+        "outputs": 1,
+        "x": 1050,
+        "y": 520,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "file_1",
+        "type": "file",
+        "z": "tab_vib",
+        "name": "原始消息记录",
+        "filename": "C:/Users/孙良言/.node-red/mqtt_received.log",
+        "filenameType": "str",
+        "appendNewline": true,
+        "createDir": false,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 400,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "debug_1",
+        "type": "debug",
+        "z": "tab_vib",
+        "name": "调试输出",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 400,
+        "y": 350,
+        "wires": []
+    }
+]

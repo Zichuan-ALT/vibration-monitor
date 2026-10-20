@@ -1,0 +1,12 @@
+* text=auto eol=lf
+
+# Office 文件与图片按二进制处理，避免 Git 尝试文本比对
+*.docx binary
+*.xlsx binary
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+
+# Windows 脚本
+*.ps1 text eol=crlf
+*.bat text eol=crlf

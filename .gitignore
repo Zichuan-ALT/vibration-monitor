@@ -1,0 +1,26 @@
+# ===== 与本项目无关（LH4018 Lab05 课程材料）=====
+.venv-lab05/
+lab05_build/
+lab05_src/
+lab05_stage/
+LH4018_Lab05_*.zip
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ===== 系统与编辑器 =====
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# ===== Office 临时锁文件 =====
+~$*
+*.tmp
+
+# ===== 运行产物（可由脚本重新生成）=====
+# 保留 PDF，因为它们是提交件；中间图片按需忽略
+*.log
