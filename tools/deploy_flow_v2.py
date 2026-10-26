@@ -54,16 +54,16 @@ FUNC_ALARM = (
 FUNC_HIST = "msg.params = [];\nreturn msg;"
 
 FUNC_CHART = (
+    "// 逐条送入（与实时图相同的单点路径，已验证可用）。\n"
+    "// 关键：图表节点的 removeOlder 必须足够大，否则客户端会立刻丢弃历史点。\n"
     "var rows = msg.payload;\n"
-    "if (!Array.isArray(rows)) { return null; }\n"
-    "if (rows.length === 0) { return { payload: [] }; }\n"
+    "if (!Array.isArray(rows) || rows.length === 0) { return null; }\n"
     "rows = rows.slice().reverse();\n"
-    "var data = rows.map(function (r) {\n"
-    "  return [ Date.parse(r.ts), r.rms ];\n"
-    "});\n"
-    "// node-red-dashboard 折线图要求 [{series, data, labels}] 格式，\n"
-    "// data 为 [[x, y], ...]；仅发 {x,y} 会触发 Bad data inject\n"
-    "return { payload: [{ series: ['振动 RMS (g)'], data: data }] };\n"
+    "var out = [{ payload: [] }];\n"
+    "for (var i = 0; i < rows.length; i++) {\n"
+    "  out.push({ payload: rows[i].rms, timestamp: Date.parse(rows[i].ts) });\n"
+    "}\n"
+    "return [out];\n"
 )
 
 flows = [
@@ -193,7 +193,7 @@ flows = [
      "label": "SQLite 历史（最近 200 条）", "chartType": "line", "legend": False,
      "xformat": "HH:mm:ss", "interpolate": "linear", "nodata": "数据库暂无数据",
      "ymin": "0", "ymax": "4",
-     "removeOlder": "0", "removeOlderPoints": "", "removeOlderUnit": "3600",
+     "removeOlder": "24", "removeOlderPoints": "", "removeOlderUnit": "3600",
      "cutout": 0, "useOneColor": True, "useUTC": False,
      "colors": ["#ff7f0e"], "outputs": 1, "x": 1050, "y": 520, "wires": [[]]},
 
