@@ -1,28 +1,40 @@
-// 步骤 6：完整节点固件 —— WiFi + MQTT + 振动测量 + 基线自学习 + 状态判定
+// 步骤 6：完整节点固件 v2 —— WiFi + MQTT + 振动测量 + 基线自学习 + 状态判定
+//                     + NTP 对时 + 非阻塞重连 + 环形缓冲补发
 // 库：MPU6050 (Electronic Cats) + arduinoFFT 2.x + PubSubClient
 // 接线：VCC→3V3  GND→GND  SDA→GPIO21  SCL→GPIO22  AD0→悬空
 //
 // 工作流程
-//   1. 连 WiFi、连 MQTT
+//   1. 连 WiFi、NTP 对时、连 MQTT
 //   2. **基线自学习**：连续采 15 帧，算带内 RMS 的均值 μ 与标准差 σ
 //      注意：自学习时设备必须处于"正常工况"（无配重），否则阈值会被学歪
 //   3. 阈值 = μ+3σ（注意） / μ+6σ（报警）
-//   4. 循环测量并上报，采用迟滞判定：
-//        升级需连续 3 帧确认，降级需连续 5 帧确认
+//   4. 循环：测量 → 存入环形缓冲 → 若已连网则把缓冲全部发出
+//   5. 迟滞判定：升级需连续 3 帧确认，降级需连续 5 帧确认
+//
+// v2 关键改进（store-and-forward）
+//   · WiFi / MQTT 重连**不再阻塞**主循环，测量周期恒定为 2 s
+//   · 网络断开时数据进入环形缓冲（60 条 = 约 2 分钟），恢复后按原顺序补发
+//   · 每条数据携带**测量时刻的 NTP 时间戳**（ts，Unix 秒），
+//     因此补发的数据在服务端仍能落在正确的时间位置
+//   · 缓冲区满则丢弃最旧一条（记录丢弃计数）
 //
 // 上报主题：smartcampus/vib/{NODE_ID}/state
 // 上报内容：
-//   {"node","seq","rms","peak","fpeak","tchip","state","warn","alarm"}
+//   {"node","seq","ts","rms","peak","fpeak","tchip","state","warn","alarm"}
+//
+// 串口命令
+//   r  重新学习基线
+//   b  打印缓冲区与网络状态
 //
 // 现场使用顺序
 //   上电 → 等自学习完成（约 20 秒）→ 正常工况运行 → 需要演示时加配重
-//   重新学习：串口发 'r' 或重新上电
 
 #include <Wire.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <MPU6050.h>
 #include <arduinoFFT.h>
+#include <time.h>
 
 // ================= 配置 =================
 const char* SSID     = "XiXiaomi";
@@ -31,6 +43,10 @@ const char* BROKER   = "10.77.48.14";
 const int   MQTT_PORT = 1883;
 const char* NODE_ID  = "esp32-01";
 const char* TOPIC_STATE = "smartcampus/vib/esp32-01/state";
+
+// NTP
+const char* NTP1 = "ntp.aliyun.com";
+const char* NTP2 = "cn.pool.ntp.org";
 
 // ================= 采样参数 =================
 #define N            1024
@@ -43,6 +59,21 @@ const char* TOPIC_STATE = "smartcampus/vib/esp32-01/state";
 
 #define LEARN_FRAMES 15      // 自学习帧数（约 16 s）
 #define PUB_PERIOD   2000    // 上报周期 ms（含测量时间）
+#define BUF_SIZE     60      // 环形缓冲容量（60 条 × 2 s ≈ 2 分钟）
+#define WIFI_RETRY_MS  10000UL
+#define MQTT_RETRY_MS  15000UL   // 重连尝试本身是阻塞的（约 5 s TCP 超时），
+                                 // 间隔放长可减少对采样节奏的影响
+#define MIN_BASE_MU    0.010 // 基线下限 g：低于此值说明设备未运行或传感器脱落
+                             // 若在此状态下学习，会把噪声底当正常运行水平，
+                             // 设备一启动就会误报警，因此必须拒绝该基线
+
+// ================= 数据结构 =================
+struct Record {
+  uint32_t seq;
+  uint32_t ts;        // 测量时刻 Unix 秒（NTP），未对时为 0
+  float rms, peak, fpeak, tchip;
+  uint8_t level;      // 0 正常 1 注意 2 报警
+};
 
 // ================= 全局 =================
 MPU6050 mpu;
@@ -53,15 +84,24 @@ ArduinoFFT<double> FFT(vReal, vImag, N, (double)FS);
 WiFiClient   espClient;
 PubSubClient mqtt(espClient);
 
-double  baseMu = 0, baseSigma = 0;      // 基线统计
-double  thrWarn = 0, thrAlarm = 0;      // 判定阈值
+double  baseMu = 0, baseSigma = 0;
+double  thrWarn = 0, thrAlarm = 0;
 bool    learned = false;
+
+bool     ntpSynced = false;
+uint32_t lastWifiTry = 0, lastMqttTry = 0;
+
+Record   ring[BUF_SIZE];
+uint16_t ringHead = 0;    // 写入位置
+uint16_t ringCount = 0;   // 当前条数
+uint32_t dropped = 0;     // 缓冲满导致丢弃的条数
+uint32_t resent = 0;      // 补发条数
 
 uint32_t seq = 0;
 double  lastRms = 0, lastPeak = 0, lastFreq = 0;
 float   lastTemp = 0;
-uint8_t stLevel = 0;                    // 0 正常 1 注意 2 报警
-uint8_t stUp = 0, stDown = 0;           // 迟滞计数
+uint8_t stLevel = 0;
+uint8_t stUp = 0, stDown = 0;
 
 // ================= 测量 =================
 uint32_t sampleBurst() {
@@ -103,45 +143,121 @@ void analyseAxis(uint8_t a, double &rmsBand, double &baseAmp, double &baseFreq) 
   rmsBand = sqrt(sumBand);
 }
 
-// 测一帧，取三轴中带内 RMS 最大者
 void measureOnce() {
   sampleBurst();
   double bestRms = -1;
   for (uint8_t a = 0; a < 3; a++) {
     double r, ba, bf;
     analyseAxis(a, r, ba, bf);
-    if (r > bestRms) {
-      bestRms = r;  lastRms = r;  lastPeak = ba;  lastFreq = bf;
-    }
+    if (r > bestRms) { bestRms = r;  lastRms = r;  lastPeak = ba;  lastFreq = bf; }
   }
   lastTemp = mpu.getTemperature() / 340.0 + 36.53;
 }
 
-// ================= 网络 =================
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(SSID, PASS);
-  Serial.printf("WiFi: 连接 %s ", SSID);
+// ================= 时间 =================
+uint32_t nowEpoch() {
+  time_t t = time(nullptr);
+  return (t > 1600000000UL) ? (uint32_t)t : 0;   // 未对时返回 0
+}
+
+void syncNTP() {
+  configTime(0, 0, NTP1, NTP2);        // 只取 UTC，时区由服务端处理
+  Serial.print("NTP: 对时中 ");
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 30000) {
+  while (millis() - t0 < 8000) {
+    if (nowEpoch() > 0) { ntpSynced = true; break; }
     Serial.print(".");  delay(500);
   }
   Serial.println();
-  if (WiFi.status() == WL_CONNECTED)
-    Serial.printf("WiFi OK   IP=%s  RSSI=%d\n",
-                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
-  else
-    Serial.println("WiFi 失败，将继续离线运行");
+  if (ntpSynced) {
+    time_t t = time(nullptr);
+    struct tm tmv;
+    gmtime_r(&t, &tmv);
+    Serial.printf("NTP OK  UTC %04d-%02d-%02d %02d:%02d:%02d\n",
+                  tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+  } else {
+    Serial.println("NTP 失败，时间戳将置 0（服务端回退为接收时刻）");
+  }
 }
 
-void connectMQTT() {
-  mqtt.setServer(BROKER, MQTT_PORT);
-  mqtt.setBufferSize(1024);
+// ================= 网络（全部非阻塞）=================
+void ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  uint32_t now = millis();
+  if (now - lastWifiTry < WIFI_RETRY_MS) return;
+  lastWifiTry = now;
+  WiFi.disconnect();
+  WiFi.begin(SSID, PASS);
+  Serial.printf("[WiFi] 重连中… (每 %lu 秒尝试一次)\n", WIFI_RETRY_MS / 1000);
+}
+
+void ensureMQTT() {
+  if (WiFi.status() != WL_CONNECTED) return;
   if (mqtt.connected()) return;
-  Serial.printf("MQTT: 连接 %s:%d ", BROKER, MQTT_PORT);
-  if (mqtt.connect(NODE_ID)) Serial.println("OK");
-  else Serial.printf("失败 rc=%d\n", mqtt.state());
+  uint32_t now = millis();
+  if (now - lastMqttTry < MQTT_RETRY_MS) return;
+  lastMqttTry = now;
+  Serial.printf("[MQTT] 连接 %s:%d …\n", BROKER, MQTT_PORT);
+  if (mqtt.connect(NODE_ID)) {
+    Serial.println("[MQTT] 已连接");
+  } else {
+    Serial.printf("[MQTT] 失败 rc=%d\n", mqtt.state());
+  }
+}
+
+// ================= 环形缓冲 =================
+void ringPush(const Record &r) {
+  ring[ringHead] = r;
+  ringHead = (ringHead + 1) % BUF_SIZE;
+  if (ringCount < BUF_SIZE) ringCount++;
+  else dropped++;                        // 满则覆盖最旧一条
+}
+
+bool ringPop(Record &out) {
+  if (ringCount == 0) return false;
+  uint16_t tail = (ringHead + BUF_SIZE - ringCount) % BUF_SIZE;
+  out = ring[tail];
+  ringCount--;
+  return true;
+}
+
+const char* levelName(uint8_t lv) {
+  if (!learned) return "uncalibrated";     // 未建立基线时不作判定
+  return (lv == 2) ? "alarm" : (lv == 1) ? "warn" : "normal";
+}
+
+bool publishRecord(const Record &r) {
+  char payload[300];
+  snprintf(payload, sizeof(payload),
+           "{\"node\":\"%s\",\"seq\":%lu,\"ts\":%lu,"
+           "\"rms\":%.4f,\"peak\":%.4f,\"fpeak\":%.1f,\"tchip\":%.1f,"
+           "\"state\":\"%s\",\"warn\":%.4f,\"alarm\":%.4f}",
+           NODE_ID, (unsigned long)r.seq, (unsigned long)r.ts,
+           r.rms, r.peak, r.fpeak, r.tchip,
+           levelName(r.level), thrWarn, thrAlarm);
+  return mqtt.publish(TOPIC_STATE, payload, false);
+}
+
+// 把缓冲里的数据按顺序全部发出去
+void drainRing() {
+  if (!mqtt.connected()) return;
+  Record r;
+  uint16_t sent = 0;
+  while (ringCount > 0 && mqtt.connected()) {
+    uint16_t tail = (ringHead + BUF_SIZE - ringCount) % BUF_SIZE;
+    Record peek = ring[tail];
+    if (!publishRecord(peek)) break;      // 发失败就留着，下轮再试
+    ringPop(r);
+    sent++;
+    if (ringCount > 0 && sent >= 20) { mqtt.loop(); delay(10); }
+  }
+  if (sent > 0) {
+    resent += sent;
+    if (sent > 1) {   // 只有真正存在积压时才提示，正常上报不打印
+      Serial.printf("[补发] %u 条已发出，缓冲剩余 %u 条\n", sent, ringCount);
+    }
+  }
 }
 
 // ================= 基线自学习 =================
@@ -162,7 +278,18 @@ void learnBaseline() {
   if (var < 0) var = 0;
   baseSigma = sqrt(var);
 
-  // 防止 sigma 过小导致阈值过紧：至少取 mu 的 15%
+  // ---- 基线下限保护 ----
+  // 设备停止时 RMS 只剩传感器噪声底（约 0.005 g）。若在此状态下学习，
+  // 阈值会被压到 0.008 g 量级，设备一旦正常运转（约 0.05 g）立刻误报警。
+  if (baseMu < MIN_BASE_MU) {
+    learned = false;
+    Serial.printf("\n!! 基线 mu = %.4f g 低于下限 %.3f g\n", baseMu, MIN_BASE_MU);
+    Serial.println("!! 判定为：设备未运行 / 传感器脱落 / 未接触被测体");
+    Serial.println("!! 已拒绝该基线，不启用报警判定");
+    Serial.println("!! 请让设备正常运转后，串口发送 r 重新学习\n");
+    return;
+  }
+
   double floorSigma = baseMu * 0.15;
   if (baseSigma < floorSigma) baseSigma = floorSigma;
 
@@ -176,7 +303,7 @@ void learnBaseline() {
 }
 
 // ================= 判定（带迟滞）=================
-const char* updateState() {
+void updateState() {
   uint8_t target = 0;
   if (lastRms >= thrAlarm)      target = 2;
   else if (lastRms >= thrWarn)  target = 1;
@@ -187,24 +314,6 @@ const char* updateState() {
 
   if (stUp >= 3)   { stLevel = target; stUp = 0; }
   if (stDown >= 5) { stLevel = target; stDown = 0; }
-
-  return (stLevel == 2) ? "alarm" : (stLevel == 1) ? "warn" : "normal";
-}
-
-// ================= 上报 =================
-void publishState(const char* state) {
-  char payload[288];
-  snprintf(payload, sizeof(payload),
-           "{\"node\":\"%s\",\"seq\":%lu,\"rms\":%.4f,\"peak\":%.4f,"
-           "\"fpeak\":%.1f,\"tchip\":%.1f,\"state\":\"%s\","
-           "\"warn\":%.4f,\"alarm\":%.4f}",
-           NODE_ID, (unsigned long)seq, lastRms, lastPeak,
-           lastFreq, lastTemp, state, thrWarn, thrAlarm);
-
-  if (mqtt.connected() && mqtt.publish(TOPIC_STATE, payload, false))
-    Serial.printf("[发送] %s\n", payload);
-  else
-    Serial.printf("[失败] MQTT 未连接  %s\n", payload);
 }
 
 // ================= 主流程 =================
@@ -218,31 +327,71 @@ void setup() {
   mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
   mpu.setDLPFMode(MPU6050_DLPF_BW_256);
 
-  Serial.println("\n=== 8.1 振动状态监测节点 ===");
+  Serial.println("\n=== 8.1 振动状态监测节点 v2（store-and-forward）===");
   Serial.printf("节点 %s   上报 %s\n", NODE_ID, TOPIC_STATE);
 
-  connectWiFi();
-  connectMQTT();
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(SSID, PASS);
+
+  Serial.print("WiFi: 连接 ");
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) {
+    Serial.print(".");  delay(500);
+  }
+  Serial.println();
+  if (WiFi.status() == WL_CONNECTED)
+    Serial.printf("WiFi OK   IP=%s  RSSI=%d\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  else
+    Serial.println("WiFi 首次连接未成功，将在后台继续重试（不阻塞测量）");
+
+  if (WiFi.status() == WL_CONNECTED) syncNTP();
+
+  mqtt.setServer(BROKER, MQTT_PORT);
+  mqtt.setBufferSize(1024);
+  ensureMQTT();
+
   learnBaseline();
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) connectWiFi();
-  if (!mqtt.connected())             connectMQTT();
-  mqtt.loop();
-
+  // ---- 先测量，保证采样节奏（即使随后重连阻塞，本周期的数据也已经采到）----
   measureOnce();
   seq++;
-  const char* state = updateState();
-  publishState(state);
+  if (learned) updateState();
 
-  Serial.printf("      RMS=%.4f  峰值=%.4f@%.1fHz  芯片温=%.1fC  状态=%s\n",
-                lastRms, lastPeak, lastFreq, lastTemp, state);
+  Record rec;
+  rec.seq   = seq;
+  rec.ts    = nowEpoch();
+  rec.rms   = lastRms;
+  rec.peak  = lastPeak;
+  rec.fpeak = lastFreq;
+  rec.tchip = lastTemp;
+  rec.level = stLevel;
+  ringPush(rec);
 
-  // 串口发 'r' 重新学习基线
+  // ---- 再处理网络（非阻塞检查；连接尝试本身可能阻塞数秒，但已不影响本周期的采样）----
+  ensureWiFi();
+  ensureMQTT();
+  if (mqtt.connected()) {
+    mqtt.loop();
+    drainRing();
+  }
+
+  Serial.printf("RMS=%.4f 峰值=%.4f@%.1fHz 温=%.1fC 状态=%s 缓冲=%u%s\n",
+                lastRms, lastPeak, lastFreq, lastTemp, levelName(stLevel),
+                ringCount, mqtt.connected() ? "" : "  [离线]");
+
+  // ---- 串口命令 ----
   if (Serial.available()) {
     char c = Serial.read();
-    if (c == 'r') { learned = false; learnBaseline(); }
+    if (c == 'r') { learnBaseline(); }
+    if (c == 'b') {
+      Serial.printf("[状态] WiFi=%d MQTT=%d NTP=%d 缓冲=%u 丢弃=%lu 补发=%lu\n",
+                    (int)WiFi.status(), mqtt.connected(), ntpSynced,
+                    ringCount, (unsigned long)dropped, (unsigned long)resent);
+    }
   }
 
   delay(PUB_PERIOD - 1024);
