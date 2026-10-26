@@ -56,12 +56,14 @@ FUNC_HIST = "msg.params = [];\nreturn msg;"
 FUNC_CHART = (
     "var rows = msg.payload;\n"
     "if (!Array.isArray(rows)) { return null; }\n"
-    "var pts = rows.map(function (r) {\n"
-    "  return { x: Date.parse(r.ts), y: r.rms };\n"
-    "}).reverse();\n"
-    "msg.reset = true;\n"
-    "msg.payload = pts;\n"
-    "return msg;"
+    "if (rows.length === 0) { return { payload: [] }; }\n"
+    "rows = rows.slice().reverse();\n"
+    "var data = rows.map(function (r) {\n"
+    "  return [ Date.parse(r.ts), r.rms ];\n"
+    "});\n"
+    "// node-red-dashboard 折线图要求 [{series, data, labels}] 格式，\n"
+    "// data 为 [[x, y], ...]；仅发 {x,y} 会触发 Bad data inject\n"
+    "return { payload: [{ series: ['振动 RMS (g)'], data: data }] };\n"
 )
 
 flows = [
