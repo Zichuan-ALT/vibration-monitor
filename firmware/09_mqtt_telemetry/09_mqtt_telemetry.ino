@@ -108,7 +108,7 @@ double  thrWarn = 0, thrAlarm = 0;
 bool    learned = false;
 
 bool     ntpSynced = false;
-uint32_t lastWifiTry = 0, lastMqttTry = 0;
+uint32_t lastWifiTry = 0, lastMqttTry = 0, lastNtpTry = 0;
 
 Record   ring[BUF_SIZE];
 uint16_t ringHead = 0;    // 写入位置
@@ -485,6 +485,14 @@ void loop() {
   // ---- 再处理网络（非阻塞检查；连接尝试本身可能阻塞数秒，但已不影响本周期的采样）----
   ensureWiFi();
   ensureMQTT();
+
+  // 若启动时 WiFi 未连通导致 NTP 未对时，联网后每 60 s 重试一次
+  if (!ntpSynced && WiFi.status() == WL_CONNECTED &&
+      (lastNtpTry == 0 || millis() - lastNtpTry > 60000UL)) {
+    lastNtpTry = millis();
+    syncNTP();
+  }
+
   if (mqtt.connected()) {
     mqtt.loop();
     drainRing();
