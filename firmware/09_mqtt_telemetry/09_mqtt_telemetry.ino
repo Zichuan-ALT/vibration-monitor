@@ -36,6 +36,8 @@
 #include <arduinoFFT.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <SPI.h>
+#include <SD.h>
 #include <time.h>
 
 // ================= 配置 =================
@@ -86,6 +88,14 @@ OneWire           oneWire(ONE_WIRE_BUS);
 DallasTemperature ds18b20(&oneWire);
 bool  tempOk = false;
 
+// microSD（SPI：CLK=18 MISO=19 MOSI=23 CS=13，VCC 必须 5V）
+#define SD_CS        13
+#define LOG_PATH     "/vib_log.csv"
+#define WAVE_DIR     "/waves"
+bool  sdOk = false;
+File  logFile;
+bool  logHasHeader = false;
+
 int16_t rawBuf[3][N];
 double  vReal[N], vImag[N];
 ArduinoFFT<double> FFT(vReal, vImag, N, (double)FS);
@@ -110,6 +120,7 @@ uint32_t seq = 0;
 double  lastRms = 0, lastPeak = 0, lastFreq = 0;
 float   lastTemp = 0;     // MPU6050 芯片温度（参考）
 float   lastSurf = NAN;   // DS18B20 表面温度（被测体）
+uint8_t lastBestAxis = 0; // 本帧最强轴（0=ax 1=ay 2=az）
 uint8_t stLevel = 0;
 uint8_t stUp = 0, stDown = 0;
 
@@ -156,10 +167,11 @@ void analyseAxis(uint8_t a, double &rmsBand, double &baseAmp, double &baseFreq) 
 void measureOnce() {
   sampleBurst();
   double bestRms = -1;
+  lastBestAxis = 0;
   for (uint8_t a = 0; a < 3; a++) {
     double r, ba, bf;
     analyseAxis(a, r, ba, bf);
-    if (r > bestRms) { bestRms = r;  lastRms = r;  lastPeak = ba;  lastFreq = bf; }
+    if (r > bestRms) { bestRms = r;  lastRms = r;  lastPeak = ba;  lastFreq = bf;  lastBestAxis = a; }
   }
 
   // 振动芯片温度（MPU6050 die 温度，仅作参考）
@@ -285,6 +297,63 @@ void drainRing() {
   }
 }
 
+// ================= 本地存储（microSD）=================
+void sdInit() {
+  SPI.begin(18, 19, 23, 13);
+  sdOk = SD.begin(SD_CS, SPI, 4000000);
+  if (!sdOk) {
+    Serial.println("[SD] 未挂载（VCC 需 5V、卡需 FAT32），本地记录关闭");
+    return;
+  }
+  Serial.printf("[SD] 挂载成功  %.1f GB\n", SD.cardSize() / (1024.0 * 1024.0 * 1024.0));
+
+  if (!SD.exists(WAVE_DIR)) SD.mkdir(WAVE_DIR);
+
+  logFile = SD.open(LOG_PATH, FILE_APPEND);
+  if (!logFile) { Serial.println("[SD] 日志文件打开失败"); sdOk = false; return; }
+
+  if (logFile.size() == 0) {
+    logFile.println("ts_epoch,iso_utc,seq,rms,peak,fpeak,temp_surface,tchip_c,state");
+  }
+  Serial.printf("[SD] 日志 %s（%u 字节）\n", LOG_PATH, (unsigned)logFile.size());
+}
+
+void sdDumpWave(uint32_t ts) {
+  if (!sdOk) return;
+  char path[48];
+  snprintf(path, sizeof(path), "%s/wave_%lu.csv", WAVE_DIR, (unsigned long)ts);
+  File w = SD.open(path, FILE_WRITE);
+  if (!w) { Serial.println("[SD] 波形文件创建失败"); return; }
+  const char* nm[3] = {"ax", "ay", "az"};
+  w.printf("# axis=%s rms=%.4f peak=%.4f fpeak=%.1f ts=%lu\n",
+           nm[lastBestAxis], lastRms, lastPeak, lastFreq, (unsigned long)ts);
+  w.println("index,raw_lsb");
+  for (uint16_t i = 0; i < N; i++) w.printf("%u,%d\n", i, rawBuf[lastBestAxis][i]);
+  w.close();
+  Serial.printf("[SD] 已保存报警波形 %s（%d 点）\n", path, N);
+}
+
+void sdLog(uint32_t ts, uint32_t sq, bool alarmEdge) {
+  if (!sdOk || !logFile) return;
+
+  char iso[24] = "";
+  if (ts > 1600000000UL) {
+    time_t t = (time_t)ts;
+    struct tm tmv;
+    gmtime_r(&t, &tmv);
+    strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+  }
+
+  logFile.printf("%lu,%s,%lu,%.4f,%.4f,%.1f,%.2f,%.1f,%s\n",
+                 (unsigned long)ts, iso, (unsigned long)sq,
+                 lastRms, lastPeak, lastFreq,
+                 isnan(lastSurf) ? -999.0 : lastSurf,
+                 lastTemp, levelName(stLevel));
+  logFile.flush();                 // 每条都刷盘，掉电最多丢一条
+
+  if (alarmEdge) sdDumpWave(ts);   // 刚进入报警状态时保存原始波形
+}
+
 // ================= 基线自学习 =================
 void learnBaseline() {
   Serial.printf("\n=== 基线自学习（%d 帧，约 %d 秒）===\n", LEARN_FRAMES, LEARN_FRAMES + 1);
@@ -386,6 +455,8 @@ void setup() {
   mqtt.setBufferSize(1024);
   ensureMQTT();
 
+  sdInit();          // 本地存储（失败不影响联网上报）
+
   learnBaseline();
 }
 
@@ -393,7 +464,9 @@ void loop() {
   // ---- 先测量，保证采样节奏（即使随后重连阻塞，本周期的数据也已经采到）----
   measureOnce();
   seq++;
+  uint8_t prevLevel = stLevel;
   if (learned) updateState();
+  bool alarmEdge = (learned && prevLevel != 2 && stLevel == 2);
 
   Record rec;
   rec.seq   = seq;
@@ -405,6 +478,9 @@ void loop() {
   rec.temp  = lastSurf;
   rec.level = stLevel;
   ringPush(rec);
+
+  // ---- 本地记录（SD 卡）：每帧一行，报警瞬间另存原始波形 ----
+  sdLog(rec.ts, seq, alarmEdge);
 
   // ---- 再处理网络（非阻塞检查；连接尝试本身可能阻塞数秒，但已不影响本周期的采样）----
   ensureWiFi();
@@ -427,6 +503,32 @@ void loop() {
       Serial.printf("[状态] WiFi=%d MQTT=%d NTP=%d 缓冲=%u 丢弃=%lu 补发=%lu\n",
                     (int)WiFi.status(), mqtt.connected(), ntpSynced,
                     ringCount, (unsigned long)dropped, (unsigned long)resent);
+      Serial.printf("[SD]   %s  已用 %.1f MB\n",
+                    sdOk ? "已挂载" : "未挂载",
+                    SD.usedBytes() / (1024.0 * 1024.0));
+    }
+    if (c == 'l') {                       // 查看本地日志
+      if (!sdOk) { Serial.println("[SD] 未挂载"); }
+      else {
+        File r = SD.open(LOG_PATH, FILE_READ);
+        if (!r) { Serial.println("[SD] 日志文件不存在"); }
+        else {
+          uint32_t sz = r.size();
+          Serial.printf("[SD] %s  %lu 字节\n", LOG_PATH, (unsigned long)sz);
+          // 跳到末尾附近，打印最后若干行
+          uint32_t start = (sz > 600) ? (sz - 600) : 0;
+          r.seek(start);
+          r.readStringUntil('\n');            // 丢弃可能被截断的半行
+          uint8_t shown = 0;
+          while (r.available() && shown < 10) {
+            String line = r.readStringUntil('\n');
+            Serial.print("  | ");
+            Serial.println(line);
+            shown++;
+          }
+          r.close();
+        }
+      }
     }
   }
 
