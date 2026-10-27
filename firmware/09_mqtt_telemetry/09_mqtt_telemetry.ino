@@ -34,6 +34,8 @@
 #include <PubSubClient.h>
 #include <MPU6050.h>
 #include <arduinoFFT.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 #include <time.h>
 
 // ================= 配置 =================
@@ -71,12 +73,19 @@ const char* NTP2 = "cn.pool.ntp.org";
 struct Record {
   uint32_t seq;
   uint32_t ts;        // 测量时刻 Unix 秒（NTP），未对时为 0
-  float rms, peak, fpeak, tchip;
+  float rms, peak, fpeak, tchip, temp;
   uint8_t level;      // 0 正常 1 注意 2 报警
 };
 
 // ================= 全局 =================
 MPU6050 mpu;
+
+// 表面温度：DS18B20（单总线 GPIO5，模块板载 4.7k 上拉，无需外接）
+#define ONE_WIRE_BUS 5
+OneWire           oneWire(ONE_WIRE_BUS);
+DallasTemperature ds18b20(&oneWire);
+bool  tempOk = false;
+
 int16_t rawBuf[3][N];
 double  vReal[N], vImag[N];
 ArduinoFFT<double> FFT(vReal, vImag, N, (double)FS);
@@ -99,7 +108,8 @@ uint32_t resent = 0;      // 补发条数
 
 uint32_t seq = 0;
 double  lastRms = 0, lastPeak = 0, lastFreq = 0;
-float   lastTemp = 0;
+float   lastTemp = 0;     // MPU6050 芯片温度（参考）
+float   lastSurf = NAN;   // DS18B20 表面温度（被测体）
 uint8_t stLevel = 0;
 uint8_t stUp = 0, stDown = 0;
 
@@ -151,7 +161,16 @@ void measureOnce() {
     analyseAxis(a, r, ba, bf);
     if (r > bestRms) { bestRms = r;  lastRms = r;  lastPeak = ba;  lastFreq = bf; }
   }
+
+  // 振动芯片温度（MPU6050 die 温度，仅作参考）
   lastTemp = mpu.getTemperature() / 340.0 + 36.53;
+
+  // 被测体表面温度（DS18B20，12 位分辨率 = 0.0625 ℃）
+  if (tempOk) {
+    ds18b20.requestTemperatures();
+    float t = ds18b20.getTempCByIndex(0);
+    if (t > -50.0f && t < 125.0f) lastSurf = t;   // 越界则保留上次有效值
+  }
 }
 
 // ================= 时间 =================
@@ -228,13 +247,19 @@ const char* levelName(uint8_t lv) {
 }
 
 bool publishRecord(const Record &r) {
-  char payload[300];
+  char payload[340];
+  char tempStr[16];
+  if (isnan(r.temp)) strcpy(tempStr, "null");
+  else                snprintf(tempStr, sizeof(tempStr), "%.2f", r.temp);
+
   snprintf(payload, sizeof(payload),
            "{\"node\":\"%s\",\"seq\":%lu,\"ts\":%lu,"
-           "\"rms\":%.4f,\"peak\":%.4f,\"fpeak\":%.1f,\"tchip\":%.1f,"
+           "\"rms\":%.4f,\"peak\":%.4f,\"fpeak\":%.1f,"
+           "\"temp\":%s,\"tchip\":%.1f,"
            "\"state\":\"%s\",\"warn\":%.4f,\"alarm\":%.4f}",
            NODE_ID, (unsigned long)r.seq, (unsigned long)r.ts,
-           r.rms, r.peak, r.fpeak, r.tchip,
+           r.rms, r.peak, r.fpeak,
+           tempStr, r.tchip,
            levelName(r.level), thrWarn, thrAlarm);
   return mqtt.publish(TOPIC_STATE, payload, false);
 }
@@ -326,9 +351,18 @@ void setup() {
   mpu.initialize();
   mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
   mpu.setDLPFMode(MPU6050_DLPF_BW_256);
+  bool mpuOk = mpu.testConnection();      // 真实检测，不写死
 
-  Serial.println("\n=== 8.1 振动状态监测节点 v2（store-and-forward）===");
+  // DS18B20 表面温度
+  ds18b20.begin();
+  ds18b20.setResolution(12);              // 0.0625 ℃
+  tempOk = (ds18b20.getDeviceCount() > 0);
+
+  Serial.println("\n=== 8.1 振动状态监测节点 v2（store-and-forward + 双传感）===");
   Serial.printf("节点 %s   上报 %s\n", NODE_ID, TOPIC_STATE);
+  Serial.printf("MPU6050: %s（WHO_AM_I 原始 0x68）   DS18B20: %s（%d 个器件）\n",
+                mpuOk ? "正常" : "未响应",
+                tempOk ? "正常" : "未检测到", ds18b20.getDeviceCount());
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
@@ -368,6 +402,7 @@ void loop() {
   rec.peak  = lastPeak;
   rec.fpeak = lastFreq;
   rec.tchip = lastTemp;
+  rec.temp  = lastSurf;
   rec.level = stLevel;
   ringPush(rec);
 
@@ -379,8 +414,9 @@ void loop() {
     drainRing();
   }
 
-  Serial.printf("RMS=%.4f 峰值=%.4f@%.1fHz 温=%.1fC 状态=%s 缓冲=%u%s\n",
-                lastRms, lastPeak, lastFreq, lastTemp, levelName(stLevel),
+  Serial.printf("RMS=%.4f 峰值=%.4f@%.1fHz  表面=%.2fC 芯片=%.1fC 状态=%s 缓冲=%u%s\n",
+                lastRms, lastPeak, lastFreq, lastSurf, lastTemp,
+                levelName(stLevel),
                 ringCount, mqtt.connected() ? "" : "  [离线]");
 
   // ---- 串口命令 ----

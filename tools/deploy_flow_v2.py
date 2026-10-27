@@ -14,9 +14,11 @@ FUNC_SPLIT = (
     "var d = msg.payload;\n"
     "if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { return null; } }\n"
     "if (!d || d.rms === undefined) { return null; }\n"
+    "// 温度优先用 DS18B20 表面温度，未接入时回退到 MPU6050 芯片温度\n"
+    "var tv = (d.temp !== undefined && d.temp !== null) ? d.temp : d.tchip;\n"
     "return [\n"
     "  { payload: d.rms },\n"
-    "  { payload: d.tchip },\n"
+    "  { payload: tv },\n"
     "  { payload: d.state },\n"
     "  { payload: d.rms, topic: 'RMS' }\n"
     "];"
@@ -34,7 +36,8 @@ FUNC_DB = (
     "} else {\n"
     "  t = new Date();\n"
     "}\n"
-    "msg.params = [ t.toISOString(), d.node || 'unknown', d.rms, d.tchip, d.state ];\n"
+    "var tv = (d.temp !== undefined && d.temp !== null) ? d.temp : d.tchip;\n"
+    "msg.params = [ t.toISOString(), d.node || 'unknown', d.rms, tv, d.state ];\n"
     "return msg;"
 )
 
@@ -127,9 +130,9 @@ flows = [
      "colors": ["#00b500", "#e6e600", "#ca3838"], "seg1": "", "seg2": "",
      "x": 640, "y": 10, "wires": []},
 
-    {"id": "gauge_temp", "type": "ui_gauge", "z": TAB, "name": "芯片温度",
+    {"id": "gauge_temp", "type": "ui_gauge", "z": TAB, "name": "表面温度",
      "group": "grp_real", "order": 2, "width": "6", "height": "5",
-     "gtype": "gage", "title": "MPU6050 芯片温度 (℃)", "label": "℃",
+     "gtype": "gage", "title": "被测体表面温度 (℃)", "label": "℃",
      "format": "{{value}}", "min": 0, "max": "60",
      "colors": ["#00b500", "#e6e600", "#ca3838"], "seg1": "", "seg2": "",
      "x": 640, "y": 70, "wires": []},
