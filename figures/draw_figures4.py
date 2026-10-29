@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""方案接线示意图（图 S2）：MPU6050 + DS18B20 + microSD，全程免焊接。"""
+"""方案接线示意图（图 S2）：MPU6050 + DS18B20 + microSD 的接线方式。"""
 import os
 import sys
 
@@ -17,7 +17,7 @@ def fig_wiring():
     d = ImageDraw.Draw(img)
 
     box(d, 100, 150, 470, 640,
-        "ESP32-WROOM-32 开发板\n（选购已焊排针版）\n\n"
+        "ESP32-WROOM-32 开发板\n（带排针的成品模块）\n\n"
         "本方案用到的引脚\n"
         "GPIO21 / 22　I²C 数据 / 时钟\n"
         "GPIO26　　　MPU6050 数据就绪\n"
@@ -37,7 +37,7 @@ def fig_wiring():
          "VCC(3V3) · GND · SDA→GPIO21 · SCL→GPIO22 · INT→GPIO26", LPURPLE, PURPLE),
         (320, "② DS18B20 温度探头（1-Wire）",
          "数据→GPIO5 · 3V3 · GND\n"
-         "裸线端经免焊螺丝端子转成排针", LPURPLE, PURPLE),
+         "裸线端经螺丝端子转成排针", LPURPLE, PURPLE),
         (490, "③ microSD 卡座模块（SPI）",
          "SCK→GPIO18 · MISO→GPIO19 · MOSI→GPIO23\nCS→GPIO13 · VCC 接 5V · GND", LPURPLE, PURPLE),
         (660, "④ 有源蜂鸣器模块（3 线）",
@@ -55,9 +55,9 @@ def fig_wiring():
               fs=18, bold=True, color=PURPLE if i < 3 else RED)
 
     box(d, 100, 850, 1570, 250,
-        "免焊接做法与供电\n"
-        "所有模块均选购已焊排针版本；传感器与主控之间用杜邦线母-母直插，"
-        "电源用母-公线引入面包板电源轨，全程不需要电烙铁。\n"
+        "接线做法与供电\n"
+        "所有模块均为带排针的成品板；传感器与主控之间用杜邦线母-母直插，"
+        "电源用母-公线引入面包板电源轨。\n"
         "电源分配：ESP32 的 3V3 / GND / 5V 经母-公线接到面包板电源轨，"
         "各模块的 VCC / GND 从电源轨取电，避免多根线挤在同一个针脚上。\n"
         "ESP32 由 USB 充电器供电，5 V USB 风扇由另一个充电器或充电宝供电——"
